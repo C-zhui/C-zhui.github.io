@@ -6,31 +6,43 @@ using namespace std;
 class Seg
 {
   public:
-    shared_ptr<vector<int>> buf;
+    vector<int> buf;
     int i;
 
     Seg() = default;
 
+    Seg(const Seg &o)
+    {
+        this->buf = move(o.buf);
+        this->i = o.i;
+    }
+
+     Seg& operator=(const Seg &o)
+    {
+        this->buf = move(o.buf);
+        this->i = o.i;
+        return *this;
+    }
+
     Seg(const vector<int> &buf)
     {
-        this->buf = make_shared<vector<int>>(begin(buf), end(buf));
+        this->i = 0;
+        this->buf = move(buf);
     }
 
     bool empty()
     {
-        return buf->size() == 0;
+        return this->i >= buf.size();
     }
 
     int get_and_move()
     {
-        int ret = (*buf)[i];
-        i++;
-        return ret;
+        return buf[i++];
     }
 
-    bool operator<(const Seg &b)
+    bool operator<(const Seg &b) const
     {
-        return (*(this->buf))[i] > (*(b.buf))[b.i];
+        return this->buf[this->i] > b.buf[b.i];
     }
 };
 
@@ -65,18 +77,18 @@ int main(int argc, char *argv[])
     MPI_Status status;
 
     if (rank == 0)
-    {
+    { // 数据分发
         int work_size = size - 1;
         int seg_len = datas.size() / work_size;
         for (int i = 1; i < size; i++)
         {
             int _len;
             if (i == size - 1)
-                _len = datas.size() - i * seg_len;
+                _len = datas.size() - (i - 1) * seg_len;
             else
                 _len = seg_len;
             MPI_Send(&_len, 1, MPI_INT32_T, i, 0, MPI_COMM_WORLD);
-            MPI_Send(datas.data() + i * seg_len, _len, MPI_INT32_T, i, 1, MPI_COMM_WORLD);
+            MPI_Send(datas.data() + (i - 1) * seg_len, _len, MPI_INT32_T, i, 1, MPI_COMM_WORLD);
         }
     }
     else
@@ -85,14 +97,39 @@ int main(int argc, char *argv[])
         datas.resize(len);
         MPI_Recv(datas.data(), datas.size(), MPI_INT32_T, 0, 1, MPI_COMM_WORLD, &status);
     }
+
     if (rank == 0)
         cout << "散播数据完毕" << endl;
 
     MPI_Barrier(MPI_COMM_WORLD);
 
     if (rank != 0) // 局部排序
+    {
         sort(begin(datas), end(datas));
+    }
 
+    int nothing;
+    if (rank == 0)
+    {
+        for (int i = 1; i < size; i++)
+        {
+            MPI_Send(&len, 1, MPI_INT32_T, i, 10, MPI_COMM_WORLD);
+            MPI_Recv(&nothing, 1, MPI_INT32_T, i, 11, MPI_COMM_WORLD, &status);
+        }
+    }
+    else
+    {
+        MPI_Recv(&nothing, 1, MPI_INT32_T, 0, 10, MPI_COMM_WORLD, &status);
+        printf("rank %d,len %ld \n", rank, datas.size());
+        for (auto a : datas)
+        {
+            printf("%d ", a);
+        }
+        printf("\n");
+        MPI_Send(&nothing, 1, MPI_INT32_T, 0, 11, MPI_COMM_WORLD);
+    }
+
+    MPI_Barrier(MPI_COMM_WORLD);
     // 每个进程选出代表元素，提交给0号
     if (rank == 0)
     { // 0 号 接收
@@ -130,11 +167,11 @@ int main(int argc, char *argv[])
         // 1 排序
         sort(begin(sample), begin(sample) + sample_len);
         cout << "排序的样本" << endl;
-        for (i = 0; i < sample_len; i++)
+        for (auto a : sample)
         {
-            cout << sample[i] << " ";
+            printf("%d ", a);
         }
-        cout << endl;
+        putchar('\n');
         // 2 采样
         for (i = size, j = 0; i < sample_len; i += size)
             sample[j++] = sample[i];
@@ -166,17 +203,18 @@ int main(int argc, char *argv[])
                 j++;
             int seg_size = j - last;
             MPI_Send(&seg_size, 1, MPI_INT32_T, 0, 4, MPI_COMM_WORLD);
-            printf("rank %d send data ,size %d \n", rank, seg_size);
+            printf("rank %d send data ,size %d ,seg %d \n", rank, seg_size, sample[i]);
             MPI_Send(datas.data() + last, seg_size, MPI_INT32_T, 0, 5, MPI_COMM_WORLD);
             last = j;
             MPI_Barrier(MPI_COMM_WORLD);
         }
 
         i--; // 最后一段
-        while (j < datas.size() && datas[j] > sample[i])
+        while (j < datas.size() && datas[j] >= sample[i])
             j++;
         int seg_size = j - last;
         MPI_Send(&seg_size, 1, MPI_INT32_T, 0, 6, MPI_COMM_WORLD);
+        printf("rank %d send data ,size %d ,seg %d \n", rank, seg_size, sample[i]);
         MPI_Send(datas.data() + last, seg_size, MPI_INT32_T, 0, 7, MPI_COMM_WORLD);
         last = j;
         MPI_Barrier(MPI_COMM_WORLD);
@@ -184,7 +222,7 @@ int main(int argc, char *argv[])
     else
     {
         datas.resize(0);
-        // priority_queue<Seg> multiRoads;
+        priority_queue<Seg> multiRoads;
         for (i = 0; i < sample_len; i++)
         { // 对每个采样
             for (j = 1; j < size; j++)
@@ -194,11 +232,19 @@ int main(int argc, char *argv[])
                 MPI_Recv(&seg_size, 1, MPI_INT32_T, j, 4, MPI_COMM_WORLD, &status);
                 seg_data.resize(seg_size);
                 MPI_Recv(seg_data.data(), seg_size, MPI_INT32_T, j, 5, MPI_COMM_WORLD, &status);
-                for (auto a : seg_data)
-                    cout << a << " ";
-                cout << endl;
+                Seg seg(seg_data);
+                multiRoads.push(seg);
             }
             MPI_Barrier(MPI_COMM_WORLD);
+
+            while (multiRoads.size())
+            {
+                auto data = multiRoads.top();
+                multiRoads.pop();
+                datas.push_back(data.get_and_move());
+                if (!data.empty()) // 非空放回
+                    multiRoads.push(data);
+            }
         }
 
         for (j = 1; j < size; j++)
@@ -208,11 +254,26 @@ int main(int argc, char *argv[])
             MPI_Recv(&seg_size, 1, MPI_INT32_T, j, 6, MPI_COMM_WORLD, &status);
             seg_data.resize(seg_size);
             MPI_Recv(seg_data.data(), seg_size, MPI_INT32_T, j, 7, MPI_COMM_WORLD, &status);
-            for (auto a : seg_data)
-                cout << a << " ";
-            cout << endl;
+            Seg seg(seg_data);
+            multiRoads.push(seg);
         }
         MPI_Barrier(MPI_COMM_WORLD);
+        while (multiRoads.size())
+        {
+            auto data = multiRoads.top();
+            multiRoads.pop();
+            datas.push_back(data.get_and_move());
+            if (!data.empty()) // 非空放回
+                multiRoads.push(data);
+        }
+    }
+
+    if(rank==0){
+        printf("datas size :%d\n",datas.size());
+        for(auto a : datas){
+            printf("%d ",a);
+        }
+        putchar('\n');
     }
 
     MPI_Finalize();
